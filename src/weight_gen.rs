@@ -6,12 +6,6 @@ use rand_distr::StandardNormal;
 pub fn input_weight(input_dimension: usize, reservoir_dimension: usize) -> na::DMatrix<f64> {
     let mut rng = rand::thread_rng();
 
-    /*
-    let elements = (0..reservoir_dimension * (input_dimension + 1))
-        .map(|_| rng.gen_bool(0.5))
-        .map(|b| if b { 0.1 } else { -0.1 })
-        .collect::<Vec<_>>();
-     */
     let elements = (0..reservoir_dimension * (input_dimension + 1))
         .map(|_| rng.gen_range(-0.5..0.5))
         .collect::<Vec<_>>();
@@ -21,18 +15,6 @@ pub fn input_weight(input_dimension: usize, reservoir_dimension: usize) -> na::D
 
 pub fn reservoir_weight(reservoir_dimension: usize) -> na::DMatrix<f64> {
     let mut rng = rand::thread_rng();
-
-    /*
-    let elements = (0..reservoir_dimension * reservoir_dimension)
-        .map(|_| rng.sample(StandardNormal))
-        .collect::<Vec<f64>>();
-
-    let w = na::DMatrix::from_vec(reservoir_dimension, reservoir_dimension, elements);
-    // let spectral_radius = w.eigenvalues().unwrap().abs().max();
-    let spectral_radius = 0.9;
-
-    w / spectral_radius
-     */
 
     let elements = (0..reservoir_dimension * reservoir_dimension)
         .map(|_| rng.gen_range(-0.5..0.5))
