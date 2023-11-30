@@ -9,11 +9,11 @@ pub trait Plot {
 impl Plot for EchoStateNetwork {
     /// First element of row
     fn plot(&self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let output = self.output.0.clone();
-        let input = self.input.0.clone();
+        let input = self.var.input().0.clone();
+        let trained = self.trained.as_ref().unwrap().output.0.clone();
 
         let mut xs = Vec::new();
-        let ys_output = output
+        let ys_trained = trained
             .column_iter()
             .map(|m| m[0] as f32)
             .collect::<Vec<_>>();
@@ -23,19 +23,20 @@ impl Plot for EchoStateNetwork {
             .predicted
             .as_ref()
             .unwrap()
+            .output
             .0
             .column_iter()
             .map(|m| m[0] as f32)
             .collect::<Vec<_>>();
 
-        for i in 0..output.ncols() {
+        for i in 0..input.ncols() {
             xs.push(i as f32 * self.delta as f32);
         }
-        for i in output.ncols()..output.ncols() + ys_predict.len() {
+        for i in input.ncols()..input.ncols() + ys_predict.len() {
             xs.push(i as f32 * self.delta as f32);
         }
 
-        let predict_start = output.ncols() as f32 * self.delta as f32;
+        let predict_start = input.ncols() as f32 * self.delta as f32;
 
         let width = 1280;
         let height = 720;
@@ -44,7 +45,7 @@ impl Plot for EchoStateNetwork {
 
         root.fill(&WHITE)?;
 
-        let (y_output_min, y_output_max) = ys_output
+        let (y_trained_min, y_trained_max) = ys_trained
             .iter()
             .fold((f32::NAN, f32::NAN), |(m, n), v| (v.min(m), v.max(n)));
 
@@ -56,8 +57,8 @@ impl Plot for EchoStateNetwork {
             .iter()
             .fold((f32::NAN, f32::NAN), |(m, n), v| (v.min(m), v.max(n)));
 
-        let y_min = y_output_min.min(y_input_min).min(y_predict_min);
-        let y_max = y_output_max.max(y_input_max).max(y_predict_max);
+        let y_min = y_trained_min.min(y_input_min).min(y_predict_min);
+        let y_max = y_trained_max.max(y_input_max).max(y_predict_max);
 
         let font = ("sans-serif", 32);
 
@@ -87,12 +88,14 @@ impl Plot for EchoStateNetwork {
 
         chart.configure_mesh().draw()?;
 
-        let output_line_series =
-            LineSeries::new(xs.iter().zip(ys_output.iter()).map(|(x, y)| (*x, *y)), &RED)
-                .point_size(2);
         let input_line_series =
             LineSeries::new(xs.iter().zip(ys_input.iter()).map(|(x, y)| (*x, *y)), &BLUE)
                 .point_size(2);
+        let trained_line_series = LineSeries::new(
+            xs.iter().zip(ys_trained.iter()).map(|(x, y)| (*x, *y)),
+            &RED,
+        )
+        .point_size(2);
         let predict_line_series = LineSeries::new(
             xs.iter()
                 .zip(ys_predict.iter())
@@ -100,8 +103,8 @@ impl Plot for EchoStateNetwork {
             &GREEN,
         )
         .point_size(2);
-        chart.draw_series(output_line_series)?;
         chart.draw_series(input_line_series)?;
+        chart.draw_series(trained_line_series)?;
         chart.draw_series(predict_line_series)?;
 
         Ok(())

@@ -12,6 +12,7 @@ fn main() {
     let amplitude = 1.0;
 
     // let input = gen.gen_sin_wave(amplitude);
+    // let input = gen.gen_cos_wave(amplitude);
     let input = gen.get_complex_wave(amplitude);
 
     let mut esn = EchoStateNetwork::new(
@@ -25,6 +26,8 @@ fn main() {
     );
 
     esn.train(REGULARIZATION_COEFFICIENT);
+
+    esn.result_trained();
 
     esn.predict(1000);
 

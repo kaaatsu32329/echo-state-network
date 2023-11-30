@@ -22,7 +22,17 @@ impl InputGen {
         let ncols = self.end_time_step - self.start_time_step;
 
         let elements: Vec<f64> = (self.start_time_step..self.end_time_step)
-            .map(|t| ((t as f64) * self.delta_time).sin() * amplitude)
+            .map(|t| ((5.0 * t as f64) * self.delta_time).sin() * amplitude)
+            .collect::<Vec<_>>();
+
+        Input(na::DMatrix::from_vec(1, ncols, elements))
+    }
+
+    pub fn gen_cos_wave(&self, amplitude: f64) -> Input {
+        let ncols = self.end_time_step - self.start_time_step;
+
+        let elements: Vec<f64> = (self.start_time_step..self.end_time_step)
+            .map(|t| ((5.0 * t as f64) * self.delta_time).cos() * amplitude)
             .collect::<Vec<_>>();
 
         Input(na::DMatrix::from_vec(1, ncols, elements))

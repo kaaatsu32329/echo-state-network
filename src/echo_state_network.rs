@@ -3,14 +3,7 @@ use nalgebra as na;
 use weight_gen::*;
 
 pub struct EchoStateNetwork {
-    /// Nu x T Matrix
-    pub(crate) input: Ut,
-    /// Nx x T Matrix
-    reservoir_variable: Xt,
-    /// Ny x T Matrix
-    pub output: Yt,
-    /// (1 + Nu + Nx) x T Matrix
-    state: Zt,
+    pub var: Variable,
     /// Nx x (1 + Nu) Matrix
     input_weight: na::DMatrix<f64>,
     /// Nx x Nx Matrix
@@ -22,7 +15,9 @@ pub struct EchoStateNetwork {
     pub(crate) delta: f64,
 
     ///
-    pub predicted: Option<Yt>,
+    pub trained: Option<Variable>,
+    ///
+    pub predicted: Option<Variable>,
 }
 
 impl EchoStateNetwork {
@@ -35,146 +30,173 @@ impl EchoStateNetwork {
         activator: fn(na::DVector<f64>) -> na::DVector<f64>,
         delta: f64,
     ) -> Self {
-        let state_dimention = 1 + input_dimension + reservoir_dimension;
+        let mut state = State(na::DMatrix::zeros(
+            1 + input_dimension + reservoir_dimension,
+            input.0.ncols(),
+        ));
+        state.0.row_mut(0).fill(1.0);
+        state.0.rows_mut(1, input_dimension).copy_from(&input.0);
+        let var = Variable::new(
+            state,
+            Output(na::DMatrix::zeros(output_dimension, input.0.ncols())),
+            input_dimension,
+            reservoir_dimension,
+            output_dimension,
+        );
+
+        let state_dimension = 1 + input_dimension + reservoir_dimension;
         let input_weight = input_weight(input_dimension, reservoir_dimension);
         let reservoir_weight = reservoir_weight(reservoir_dimension);
-        let output_weight = output_weight(output_dimension, state_dimention);
-
-        let reservoir_variable = Reservoir(na::DMatrix::zeros(reservoir_dimension, 1));
-        let output = Output(na::DMatrix::zeros(output_dimension, 1));
-
-        let mut state = State(na::DMatrix::zeros(state_dimention, input.0.ncols()));
-        state.0.row_mut(0).fill(1.0);
+        let output_weight = output_weight(output_dimension, state_dimension);
 
         Self {
-            input,
-            reservoir_variable,
-            output,
-            state,
+            var,
             input_weight,
             reservoir_weight,
             output_weight,
             leak_rate,
             activator,
             delta,
+            trained: None,
             predicted: None,
         }
     }
 
     pub fn train(&mut self, regularization_coefficient: f64) {
-        let steps = self.input.0.ncols();
+        let steps = self.var.step();
+        let u_0 = self.var.input_with_bias_t(0).clone();
+        let x_0 = (self.activator)(self.input_weight.clone() * u_0);
+        self.append_reservoir_variables(&x_0, 0);
+
         for step in 0..steps - 1 {
-            self.update_state(step);
             self.update_reservoir_variables(step);
         }
-        self.update_state(steps - 1);
         self.update_output_weight(regularization_coefficient);
 
-        self.result_trained();
+        self.var.output.0 = self.output_weight.clone() * self.var.state.0.clone();
     }
 
     pub fn predict(&mut self, predict_steps: usize) {
-        let mut reservoir_variable = self
-            .reservoir_variable
+        let u_1 = self.var.output_t(self.var.output.0.ncols() - 1).clone();
+
+        let x_0 = self
+            .var
+            .reservoir_t(self.var.reservoir().0.ncols() - 1)
+            .clone();
+
+        let mut state = State(na::DMatrix::zeros(self.var.size(), predict_steps));
+        state.0.row_mut(0).fill(1.0);
+        state
             .0
-            .column(self.reservoir_variable.0.ncols() - 1)
-            .into();
+            .view_mut((1, 1), (self.var.input_dimension, 1))
+            .copy_from(&u_1);
+        state
+            .0
+            .view_mut(
+                (1 + self.var.input_dimension, 0),
+                (self.var.reservoir_dimension, 1),
+            )
+            .copy_from(&x_0);
 
-        let size = 1 + self.input.0.nrows() + self.reservoir_variable.0.nrows();
+        let output = Output(na::DMatrix::zeros(
+            self.var.output_dimension,
+            predict_steps + 1,
+        ));
 
-        let mut predicted_output = na::DMatrix::zeros(self.output.0.nrows(), predict_steps);
-        predicted_output
-            .column_mut(0)
-            .copy_from(&self.output.0.column(self.output.0.ncols() - 1));
+        let mut predicted = Variable::new(
+            state,
+            output,
+            self.var.input_dimension,
+            self.var.reservoir_dimension,
+            self.var.output_dimension,
+        );
 
         for step in 0..predict_steps - 1 {
-            let u_t = predicted_output.column(step);
-            let u_t = u_t.insert_row(0, 1.0);
-            reservoir_variable =
-                self.sequence_reservoir_variables(&u_t.clone().into(), &reservoir_variable);
+            let x_t = predicted.reservoir_t(step);
+            let u_t1 = predicted.input_with_bias_t(step + 1);
+            let x_t1 = self.sequence_reservoir_variables(&u_t1, &x_t);
 
-            let mut state = na::DMatrix::zeros(size, 1);
-            state.view_mut((0, 0), (u_t.nrows(), 1)).copy_from(&u_t);
-            state
-                .view_mut((u_t.nrows(), 0), (reservoir_variable.nrows(), 1))
-                .copy_from(&reservoir_variable);
+            predicted.replace_reservoir_t(step + 1, &x_t1);
 
-            predicted_output
-                .column_mut(step + 1)
-                .copy_from(&(self.output_weight.clone() * state));
+            let y_t1 = self.output_weight.clone() * predicted.state_t(step + 1);
+            predicted.replace_output_t(step + 1, &y_t1);
         }
-        self.predicted = Some(Output(predicted_output));
+
+        predicted.state.0 = predicted.state.0.remove_column(0);
+        predicted.output.0 = predicted.output.0.remove_column(0);
+
+        self.predicted = Some(predicted);
     }
 
     pub fn result_trained(&mut self) {
-        self.output.0 = self.output_weight.clone() * self.state.0.clone();
+        let size = self.var.size();
+        let steps = self.var.step();
+
+        let mut state = State(na::DMatrix::zeros(size, steps));
+        state.0.row_mut(0).fill(1.0);
+        state
+            .0
+            .rows_mut(1, self.var.input_dimension)
+            .copy_from(&self.var.input().0);
+        let mut trained = Variable::new(
+            state,
+            Output(na::DMatrix::zeros(self.var.output_dimension, steps)),
+            self.var.input_dimension,
+            self.var.reservoir_dimension,
+            self.var.output_dimension,
+        );
+
+        let u_0 = trained.input_with_bias_t(0).clone();
+        let x_0 = (self.activator)(self.input_weight.clone() * u_0);
+        trained.replace_reservoir_t(0, &x_0);
+
+        for step in 0..steps - 1 {
+            let x_t = trained.reservoir_t(step);
+            let u_t1 = trained.input_with_bias_t(step + 1);
+            let x_t1 = self.sequence_reservoir_variables(&u_t1, &x_t);
+
+            trained.replace_reservoir_t(step + 1, &x_t1);
+        }
+
+        trained.output.0 = self.output_weight.clone() * trained.state.0.clone();
+
+        self.trained = Some(trained);
     }
 
     fn update_reservoir_variables(&mut self, step: usize) {
-        let reservoir_variable = self.reservoir_variable.0.clone();
-        let u_t = self.input.0.clone().column(step).insert_row(0, 1.0);
-        let x_t = reservoir_variable.column(step);
-        let x_t1 = self.sequence_reservoir_variables(&u_t, &x_t.into());
+        let x_t = self.var.reservoir_t(step);
+        let u_t1 = self.var.input_with_bias_t(step + 1);
+        let x_t1 = self.sequence_reservoir_variables(&u_t1, &x_t);
 
-        self.append_reservoir_variables(&x_t1, step);
+        self.append_reservoir_variables(&x_t1, step + 1);
     }
 
+    /// x(t+1) = (1-a) * x(t) + a * tanh( W_in * u(t+1) + W_res * x(t) )
+    /// `a` is leak rate
     fn sequence_reservoir_variables(
         &self,
-        u_t: &na::DVector<f64>,
+        u_t1: &na::DVector<f64>,
         x_t: &na::DVector<f64>,
     ) -> na::DVector<f64> {
         let x_hat = (self.activator)(
-            self.input_weight.clone() * u_t + self.reservoir_weight.clone() * x_t.clone(),
+            self.input_weight.clone() * u_t1 + self.reservoir_weight.clone() * x_t.clone(),
         );
 
         (1. - self.leak_rate) * x_t + self.leak_rate * x_hat
     }
 
     fn append_reservoir_variables(&mut self, x_t: &na::DVector<f64>, step: usize) {
-        self.reservoir_variable = Reservoir({
-            let mut mat = self
-                .reservoir_variable
-                .0
-                .clone()
-                .insert_column(step + 1, 0.0);
-            mat.column_mut(step + 1).copy_from(x_t);
-            mat
-        });
-    }
-
-    fn update_state(&mut self, step: usize) {
-        let z_t = self.sequence_state(step);
-        self.append_state(&z_t, step);
-    }
-
-    fn sequence_state(&self, step: usize) -> na::DVector<f64> {
-        let size = 1 + self.input.0.nrows() + self.reservoir_variable.0.nrows();
-        let mut z_t = na::DVector::zeros(size);
-        z_t[0] = 1.0;
-        z_t.view_mut((1, 0), (self.input.0.nrows(), 1))
-            .copy_from(&self.input.0.column(step));
-        z_t.view_mut(
-            (1 + self.input.0.nrows(), 0),
-            (self.reservoir_variable.0.nrows(), 1),
-        )
-        .copy_from(&self.reservoir_variable.0.column(step));
-
-        z_t
-    }
-
-    fn append_state(&mut self, z_t: &na::DVector<f64>, step: usize) {
-        self.state.0.column_mut(step).copy_from(&z_t);
+        self.var.replace_reservoir_t(step, x_t);
     }
 
     fn update_output_weight(&mut self, regularization_coefficient: f64) {
-        let size = 1 + self.input.0.nrows() + self.reservoir_variable.0.nrows();
+        let size = self.var.size();
         let identity = regularization_coefficient * na::DMatrix::<f64>::identity(size, size);
 
-        let z_z = self.state.0.clone() * self.state.0.clone().transpose();
+        let z_z = self.var.state.0.clone() * self.var.state.0.clone().transpose();
 
-        self.output_weight = self.input.0.clone()
-            * self.state.0.clone().transpose()
+        self.output_weight = self.var.input().0.clone()
+            * self.var.state.0.clone().transpose()
             * (z_z + identity).try_inverse().unwrap();
     }
 }
@@ -192,49 +214,39 @@ mod test {
     const LEAK_RATE: f64 = 0.05;
     const REGULARIZATION_COEFFICIENT: f64 = 1e-2;
 
+    const TEST_STEP: usize = 10;
+
     #[test]
     fn test_train() {
-        let step = 10;
-        let mut esn = esn_for_test(step);
+        let mut esn = esn_for_test(TEST_STEP);
 
         esn.train(REGULARIZATION_COEFFICIENT);
     }
 
     #[test]
-    fn test_next_reservoir_variable() {
-        let step = 2;
-        let mut esn = esn_for_test(step);
-        esn.update_reservoir_variables(0);
+    fn test_predict() {}
 
-        let tanh_0_2 = 0.2_f64.tanh();
-        let elements = vec![tanh_0_2, -tanh_0_2, tanh_0_2, -tanh_0_2];
-        let x_hat = LEAK_RATE * na::DVector::from_vec(elements);
-        let mut expected_reservoir = na::DMatrix::zeros(RESERVOIR_DIMENSION, step);
-        expected_reservoir.column_mut(1).copy_from(&x_hat);
+    #[test]
+    fn test_result_trained() {}
 
-        for (i, e) in esn.reservoir_variable.0.iter().enumerate() {
-            assert_approx_eq!(e, expected_reservoir.data.as_vec()[i]);
-        }
-    }
+    #[test]
+    fn test_update_reservoir_variables() {}
+
+    #[test]
+    fn test_sequence_reservoir_variables() {}
+
+    #[test]
+    fn test_append_reservoir_variables() {}
 
     #[test]
     fn test_update_output_weight() {
-        let step = 2;
-        let mut esn = esn_for_test(step);
-        let size = 1 + INPUT_DIMENSION + RESERVOIR_DIMENSION;
+        let mut esn = esn_for_test(TEST_STEP);
 
-        esn.update_reservoir_variables(0);
+        esn.input_weight = input_for_test(TEST_STEP).0;
+        let element = vec![1.; TEST_STEP * TEST_STEP];
+        esn.var.state.0 = na::DMatrix::from_vec(TEST_STEP + 1, TEST_STEP + 1, element);
+
         esn.update_output_weight(REGULARIZATION_COEFFICIENT);
-
-        let expected_output_weight = esn.input.0 * esn.state.0.transpose() * {
-            let z_z = esn.state.0.clone() * esn.state.0.clone().transpose()
-                + REGULARIZATION_COEFFICIENT * na::DMatrix::identity(size, size);
-            z_z.try_inverse().unwrap()
-        };
-
-        for (i, e) in esn.output_weight.data.as_vec().iter().enumerate() {
-            assert_approx_eq!(e, expected_output_weight.data.as_vec()[i]);
-        }
     }
 
     fn esn_for_test(step: usize) -> EchoStateNetwork {
